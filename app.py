@@ -5,7 +5,7 @@ from PIL import Image
 from inference_sdk import InferenceHTTPClient
 from dotenv import load_dotenv
 from flask import send_from_directory
-load_dotenv
+load_dotenv()
 app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
