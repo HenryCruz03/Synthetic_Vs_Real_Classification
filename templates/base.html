@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Synthetic vs Real Image Classifier</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <header>
+        <h1>Synthetic vs Real Image Classifier</h1>
+    </header>
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+   <script>
+    document.addEventListener('DOMContentLoaded',function() {
+        var form = document.querySelector('form');
+        if(form) {
+            form.onsubmit= function() {
+                document.getElementById('spinner').style.display='block';
+            
+            }
+        }
+    });
+   </script> 
+   <script>
+const dropArea = document.getElementById('drop-area');
+const fileInput = document.getElementById('image');
+const previewImg = document.getElementById('image-preview');
+const dropText = document.getElementById('drop-text');
+function showPreview(file) {
+  if (!file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.readAsDataURL(file);
+  reader.onload = function(e) {
+    previewImg.src = e.target.result;
+    previewImg.style.display = 'block';
+  }
+}
+dropArea.addEventListener('click', () => fileInput.click());
+dropArea.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  dropArea.style.background = "#dbeafe";
+  dropText.textContent = "Release to upload";
+});
+dropArea.addEventListener('dragleave', (e) => {
+  e.preventDefault();
+  dropArea.style.background = "#f9fafb";
+  dropText.textContent = "Drag & drop an image here, or browse";
+});
+dropArea.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropArea.style.background = "#f9fafb";
+  dropText.textContent = "Drag & drop an image here, or browse";
+  const files = e.dataTransfer.files;
+  if (files && files[0]) {
+    fileInput.files = files;
+    showPreview(files[0]);
+  }
+});
+// Preview selected file (from browsing)
+fileInput.addEventListener('change', function() {
+  if(this.files && this.files[0]) showPreview(this.files[0]);
+});
+// Spinner on submit
+document.getElementById('upload-form').onsubmit = function() {
+  document.getElementById('spinner').style.display = 'block';
+};
+</script>
+</body>
+</html>

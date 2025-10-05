@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+    <div class="result-container">
+        <h2>Classification Result</h2>
+        <img src ="{{ url_for('uploaded_file', filename=filename) }}" alt="Uploaded Image" style="max-width: 300px; border-radius:8px; box-shadow: 0 4px 12px #0002; margin-bottom:1rem;"/>        <div class="result-box">
+            <p><strong>Prediction:</strong> {{ prediction }}</p>
+            <p><strong>Confidence:</strong> {{ (confidence * 100)|round(1) }}%</p>
+        </div>
+        <a href="{{ url_for('index') }}" class="btn">Classify Another Image</a>
+    </div>
+{% endblock %}
