@@ -2,8 +2,13 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="AI-powered image classifier to distinguish between synthetic and real images">
     <title>Synthetic vs Real Image Classifier</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
     <header>
@@ -12,60 +17,202 @@
     <main>
         {% block content %}{% endblock %}
     </main>
-   <script>
-    document.addEventListener('DOMContentLoaded',function() {
-        var form = document.querySelector('form');
-        if(form) {
-            form.onsubmit= function() {
-                document.getElementById('spinner').style.display='block';
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const dropArea = document.getElementById('drop-area');
+    const fileInput = document.getElementById('image');
+    const previewImg = document.getElementById('image-preview');
+    const dropText = document.getElementById('drop-text');
+    const submitBtn = document.getElementById('submit-btn');
+    const spinner = document.getElementById('spinner');
+    const form = document.getElementById('upload-form');
+    
+    // File validation
+    function validateFile(file) {
+        const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+        const maxSize = 10 * 1024 * 1024; // 10MB
+        
+        if (!allowedTypes.includes(file.type)) {
+            showError('Please select a valid image file (JPG, PNG, or WEBP)');
+            return false;
+        }
+        
+        if (file.size > maxSize) {
+            showError('File size must be less than 10MB');
+            return false;
+        }
+        
+        return true;
+    }
+    
+    // Show error message
+    function showError(message) {
+        // Remove existing error
+        const existingError = document.querySelector('.file-error');
+        if (existingError) existingError.remove();
+        
+        // Create new error
+        const errorDiv = document.createElement('div');
+        errorDiv.className = 'file-error alert';
+        errorDiv.innerHTML = `<strong>⚠️ Error:</strong> ${message}`;
+        
+        // Insert after drop area
+        dropArea.parentNode.insertBefore(errorDiv, dropArea.nextSibling);
+        
+        // Auto-remove after 5 seconds
+        setTimeout(() => {
+            if (errorDiv.parentNode) {
+                errorDiv.remove();
+            }
+        }, 5000);
+    }
+    
+    // Show preview
+    function showPreview(file) {
+        if (!file || !file.type.startsWith('image/')) return;
+        
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            previewImg.src = e.target.result;
+            previewImg.style.display = 'block';
+            dropText.style.display = 'none';
             
+            // Enable submit button
+            if (submitBtn) {
+                submitBtn.disabled = false;
+            }
+        };
+        reader.readAsDataURL(file);
+    }
+    
+    // Clear preview
+    function clearPreview() {
+        previewImg.src = '';
+        previewImg.style.display = 'none';
+        dropText.style.display = 'block';
+        if (submitBtn) {
+            submitBtn.disabled = true;
+        }
+    }
+    
+    // Drag and drop events
+    if (dropArea) {
+        dropArea.addEventListener('click', () => fileInput.click());
+        
+        dropArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropArea.classList.add('dragover');
+            dropText.textContent = "Release to upload";
+        });
+        
+        dropArea.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dropArea.classList.remove('dragover');
+            dropText.textContent = "Drag & drop an image here, or browse";
+        });
+        
+        dropArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropArea.classList.remove('dragover');
+            dropText.textContent = "Drag & drop an image here, or browse";
+            
+            const files = e.dataTransfer.files;
+            if (files && files[0]) {
+                if (validateFile(files[0])) {
+                    fileInput.files = files;
+                    showPreview(files[0]);
+                }
+            }
+        });
+        
+        // Keyboard accessibility
+        dropArea.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                fileInput.click();
+            }
+        });
+    }
+    
+    // File input change
+    if (fileInput) {
+        fileInput.addEventListener('change', function() {
+            if (this.files && this.files[0]) {
+                if (validateFile(this.files[0])) {
+                    showPreview(this.files[0]);
+                } else {
+                    this.value = ''; // Clear invalid file
+                }
+            }
+        });
+    }
+    
+    // Form submission
+    if (form) {
+        form.addEventListener('submit', function(e) {
+            if (!fileInput.files || !fileInput.files[0]) {
+                e.preventDefault();
+                showError('Please select an image file first');
+                return;
+            }
+            
+            // Show loading state
+            if (spinner) {
+                spinner.style.display = 'block';
+            }
+            
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                const btnText = submitBtn.querySelector('.btn-text');
+                const btnLoading = submitBtn.querySelector('.btn-loading');
+                if (btnText) btnText.style.display = 'none';
+                if (btnLoading) btnLoading.style.display = 'inline';
+            }
+        });
+    }
+    
+    // Add clear button functionality
+    function addClearButton() {
+        if (previewImg && previewImg.style.display !== 'none') {
+            const clearBtn = document.createElement('button');
+            clearBtn.type = 'button';
+            clearBtn.textContent = '✕ Clear';
+            clearBtn.className = 'clear-btn';
+            clearBtn.style.cssText = `
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                background: rgba(0,0,0,0.7);
+                color: white;
+                border: none;
+                border-radius: 50%;
+                width: 30px;
+                height: 30px;
+                cursor: pointer;
+                font-size: 14px;
+            `;
+            
+            const imageContainer = previewImg.parentNode;
+            if (imageContainer && !imageContainer.querySelector('.clear-btn')) {
+                imageContainer.style.position = 'relative';
+                imageContainer.appendChild(clearBtn);
+                
+                clearBtn.addEventListener('click', () => {
+                    clearPreview();
+                    fileInput.value = '';
+                    clearBtn.remove();
+                });
             }
         }
-    });
-   </script> 
-   <script>
-const dropArea = document.getElementById('drop-area');
-const fileInput = document.getElementById('image');
-const previewImg = document.getElementById('image-preview');
-const dropText = document.getElementById('drop-text');
-function showPreview(file) {
-  if (!file.type.startsWith('image/')) return;
-  const reader = new FileReader();
-  reader.readAsDataURL(file);
-  reader.onload = function(e) {
-    previewImg.src = e.target.result;
-    previewImg.style.display = 'block';
-  }
-}
-dropArea.addEventListener('click', () => fileInput.click());
-dropArea.addEventListener('dragover', (e) => {
-  e.preventDefault();
-  dropArea.style.background = "#dbeafe";
-  dropText.textContent = "Release to upload";
+    }
+    
+    // Monitor preview changes
+    const observer = new MutationObserver(addClearButton);
+    if (previewImg) {
+        observer.observe(previewImg, { attributes: true, attributeFilter: ['style'] });
+    }
 });
-dropArea.addEventListener('dragleave', (e) => {
-  e.preventDefault();
-  dropArea.style.background = "#f9fafb";
-  dropText.textContent = "Drag & drop an image here, or browse";
-});
-dropArea.addEventListener('drop', (e) => {
-  e.preventDefault();
-  dropArea.style.background = "#f9fafb";
-  dropText.textContent = "Drag & drop an image here, or browse";
-  const files = e.dataTransfer.files;
-  if (files && files[0]) {
-    fileInput.files = files;
-    showPreview(files[0]);
-  }
-});
-// Preview selected file (from browsing)
-fileInput.addEventListener('change', function() {
-  if(this.files && this.files[0]) showPreview(this.files[0]);
-});
-// Spinner on submit
-document.getElementById('upload-form').onsubmit = function() {
-  document.getElementById('spinner').style.display = 'block';
-};
 </script>
 </body>
+</html>
 </html>
