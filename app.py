@@ -38,40 +38,105 @@ def classify_with_roboflow(image_path):
     Use Roboflow SDK to classify the image
     """
     try:
+        # Check if file exists and is readable
+        if not os.path.exists(image_path):
+            logger.error(f"Image file does not exist: {image_path}")
+            return None, None, "Image file not found"
+        
+        # Check file size
+        file_size = os.path.getsize(image_path)
+        logger.info(f"Image file size: {file_size} bytes")
+        
+        if file_size == 0:
+            logger.error("Image file is empty")
+            return None, None, "Image file is empty"
+        
+        # Initialize Roboflow client
+        logger.info("Initializing Roboflow client...")
         project = rf.workspace().project("ai-image-detector-dolex")
         model = project.version(8).model
-        result = model.predict(image_path).json()
+        logger.info("Roboflow model loaded successfully")
         
-        logger.info(f"Roboflow API response: {result}")
+        # Make prediction
+        logger.info(f"Making prediction for: {image_path}")
+        result = model.predict(image_path)
+        logger.info(f"Raw prediction result type: {type(result)}")
         
-        if 'predictions' in result and len(result['predictions']) > 0:
-            prediction = result['predictions'][0]['class']
-            confidence = result['predictions'][0]['confidence']
+        # Convert to JSON if needed
+        if hasattr(result, 'json'):
+            result_json = result.json()
+        else:
+            result_json = result
             
-            # Normalize prediction labels to match expected format
-            if prediction.lower() in ['synthetic', 'ai-generated', 'ai_generated', 'ai generated']:
-                prediction = "AI-Generated Image"
-            elif prediction.lower() in ['real', 'natural', 'authentic']:
-                prediction = "Real Image"
+        logger.info(f"Roboflow API response: {result_json}")
+        
+        # Handle different response formats
+        predictions = []
+        if isinstance(result_json, dict):
+            if 'predictions' in result_json:
+                predictions = result_json['predictions']
+            elif 'results' in result_json:
+                predictions = result_json['results']
+        elif isinstance(result_json, list):
+            predictions = result_json
+        
+        if predictions and len(predictions) > 0:
+            # Get the first prediction
+            first_prediction = predictions[0]
+            logger.info(f"First prediction: {first_prediction}")
+            
+            # Extract class and confidence
+            if isinstance(first_prediction, dict):
+                prediction = first_prediction.get('class', first_prediction.get('label', 'unknown'))
+                confidence = first_prediction.get('confidence', first_prediction.get('score', 0.0))
             else:
-                # If we get an unexpected label, try to determine from confidence
-                if confidence > 0.5:
-                    prediction = "AI-Generated Image" if "synthetic" in prediction.lower() or "ai" in prediction.lower() else "Real Image"
-                else:
-                    prediction = "Real Image"  # Default to real if uncertain
-                    
-            logger.info(f"Normalized prediction: {prediction} (confidence: {confidence})")
-            return prediction, confidence, None
+                # Handle case where prediction might be a string
+                prediction = str(first_prediction)
+                confidence = 0.5
+                
+            logger.info(f"Extracted - Class: {prediction}, Confidence: {confidence}")
+            
+            # Normalize prediction labels
+            prediction_lower = prediction.lower()
+            if any(term in prediction_lower for term in ['synthetic', 'ai-generated', 'ai_generated', 'ai generated', 'fake', 'artificial']):
+                normalized_prediction = "AI-Generated Image"
+            elif any(term in prediction_lower for term in ['real', 'natural', 'authentic', 'genuine']):
+                normalized_prediction = "Real Image"
+            else:
+                # Default based on confidence
+                normalized_prediction = "AI-Generated Image" if confidence > 0.5 else "Real Image"
+                
+            logger.info(f"Final prediction: {normalized_prediction} (confidence: {confidence})")
+            return normalized_prediction, float(confidence), None
         else:
             logger.warning("No predictions found in Roboflow response")
-            return "Real Image", 0.5, None  # Default to real with medium confidence
+            return "Real Image", 0.5, None
             
     except Exception as e:
-        logger.error(f"Error with Roboflow inference: {str(e)}")
-        return None, None, f"Classification error: {str(e)}"
+        logger.error(f"Error with Roboflow inference: {str(e)}", exc_info=True)
+        
+        # Check if it's a connection/API error vs a file error
+        error_msg = str(e).lower()
+        if any(term in error_msg for term in ['connection', 'network', 'timeout', 'api', 'roboflow']):
+            return None, None, f"Roboflow API connection error: {str(e)}"
+        else:
+            return None, None, f"Classification error: {str(e)}"
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
+
+@app.route('/test-roboflow')
+def test_roboflow():
+    """Test endpoint to check Roboflow connection"""
+    try:
+        logger.info("Testing Roboflow connection...")
+        project = rf.workspace().project("ai-image-detector-dolex")
+        model = project.version(8).model
+        logger.info("Roboflow model loaded successfully")
+        return {"status": "success", "message": "Roboflow connection successful"}
+    except Exception as e:
+        logger.error(f"Roboflow connection test failed: {str(e)}")
+        return {"status": "error", "message": f"Roboflow connection failed: {str(e)}"}
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
@@ -113,12 +178,18 @@ def index():
                 return render_template("index.html", error="Invalid image file. Please upload a valid image.")
             
             # Classify image
+            logger.info(f"Starting classification for: {unique_filename}")
             prediction, confidence, error = classify_with_roboflow(filepath)
             
             if error:
                 os.remove(filepath)
                 logger.error(f"Classification error: {error}")
                 return render_template("index.html", error=f"Classification failed: {error}")
+            
+            if prediction is None or confidence is None:
+                os.remove(filepath)
+                logger.error("Classification returned None values")
+                return render_template("index.html", error="Classification failed: No valid result returned")
             
             logger.info(f"Classification successful: {prediction} (confidence: {confidence})")
             
