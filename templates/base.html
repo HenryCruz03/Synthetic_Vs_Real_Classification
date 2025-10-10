@@ -156,6 +156,14 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
             
+            // Double-check file is still valid
+            const file = fileInput.files[0];
+            if (!file || file.size === 0) {
+                e.preventDefault();
+                showError('Invalid file selected. Please choose a valid image.');
+                return;
+            }
+            
             // Show loading state
             if (spinner) {
                 spinner.style.display = 'block';
@@ -167,6 +175,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 const btnLoading = submitBtn.querySelector('.btn-loading');
                 if (btnText) btnText.style.display = 'none';
                 if (btnLoading) btnLoading.style.display = 'inline';
+            }
+            
+            // Disable clear button during submission
+            const clearBtn = document.querySelector('.clear-btn');
+            if (clearBtn) {
+                clearBtn.disabled = true;
+                clearBtn.style.opacity = '0.5';
             }
         });
     }
@@ -197,10 +212,16 @@ document.addEventListener('DOMContentLoaded', function() {
                 imageContainer.style.position = 'relative';
                 imageContainer.appendChild(clearBtn);
                 
-                clearBtn.addEventListener('click', () => {
-                    clearPreview();
-                    fileInput.value = '';
-                    clearBtn.remove();
+                clearBtn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    
+                    // Only allow clearing if form is not being submitted
+                    if (!submitBtn || !submitBtn.disabled) {
+                        clearPreview();
+                        fileInput.value = '';
+                        clearBtn.remove();
+                    }
                 });
             }
         }
