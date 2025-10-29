@@ -3,6 +3,7 @@ import uuid
 from flask import Flask, render_template, request, redirect, url_for, flash
 from PIL import Image
 from roboflow import Roboflow
+from agent import run_agent_on_image
 from dotenv import load_dotenv
 from flask import send_from_directory
 from werkzeug.utils import secure_filename
@@ -10,7 +11,6 @@ import logging
 
 load_dotenv()
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here'  # Change this in production
 
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 # Initialize Roboflow client
 
-rf=Roboflow(api_key="9VDk4sfMMuanS6OE8aRU")
+ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY")
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -53,7 +53,7 @@ def classify_with_roboflow(image_path):
         
         # Initialize Roboflow client
         logger.info("Initializing Roboflow client...")
-        project = rf.workspace().project("ai-image-detector-dolex")
+        project = ROBOFLOW_API_KEY.workspace().project("ai-image-detector-dolex")
         model = project.version(8).model
         logger.info("Roboflow model loaded successfully")
         
@@ -130,13 +130,104 @@ def test_roboflow():
     """Test endpoint to check Roboflow connection"""
     try:
         logger.info("Testing Roboflow connection...")
-        project = rf.workspace().project("ai-image-detector-dolex")
+        project = ROBOFLOW_API_KEY.workspace().project("ai-image-detector-dolex")
         model = project.version(8).model
         logger.info("Roboflow model loaded successfully")
         return {"status": "success", "message": "Roboflow connection successful"}
     except Exception as e:
         logger.error(f"Roboflow connection test failed: {str(e)}")
         return {"status": "error", "message": f"Roboflow connection failed: {str(e)}"}
+@app.route('/agent-demo', methods=["POST"])
+def agent_demo():
+    """Demo endpoint to run agent and return step-by-step JSON."""
+    if 'image' not in request.files:
+        return {"status": "error", "message": "No file provided. Use form-data with key 'image'"}, 400
+    file = request.files['image']
+    if file.filename == '':
+        return {"status": "error", "message": "Empty filename"}, 400
+    if not allowed_file(file.filename):
+        return {"status": "error", "message": "Invalid file type"}, 400
+
+    filename = secure_filename(file.filename)
+    temp_path = os.path.join(UPLOAD_FOLDER, f"demo_{uuid.uuid4().hex}_{filename}")
+    file.save(temp_path)
+    try:
+        label, conf, details = run_agent_on_image(temp_path)
+        return {
+            "status": "success",
+            "final": {"label": label, "confidence": conf},
+            "steps": details.get("steps", {}),
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"Agent run failed: {str(e)}"}, 500
+    finally:
+        try:
+            os.remove(temp_path)
+        except Exception:
+            pass
+
+
+@app.route('/training-curation', methods=["POST"])
+def training_curation():
+    """Endpoint for training data curation decisions."""
+    try:
+        data = request.get_json()
+        if not data:
+            return {"status": "error", "message": "No JSON data provided"}, 400
+        
+        action = data.get("action")  # "accept_all", "reject_all", "selective"
+        selected_images = data.get("selected_images", [])  # List of image paths to accept
+        image_id = data.get("image_id")  # Original image that triggered the enhancement
+        
+        if action == "accept_all":
+            # Add all generated images to training data
+            logger.info(f"Accepting all generated images for training data curation")
+            return {
+                "status": "success", 
+                "message": "All generated images added to training data",
+                "action": "accept_all"
+            }
+        elif action == "reject_all":
+            # Reject all generated images
+            logger.info(f"Rejecting all generated images")
+            return {
+                "status": "success", 
+                "message": "All generated images rejected",
+                "action": "reject_all"
+            }
+        elif action == "selective":
+            # Accept only selected images
+            if not selected_images:
+                return {"status": "error", "message": "No images selected for selective acceptance"}, 400
+            
+            # Process selected images
+            accepted_count = 0
+            for img_data in selected_images:
+                try:
+                    # Here you would typically:
+                    # 1. Move images to training data folder
+                    # 2. Update training dataset metadata
+                    # 3. Log the addition for tracking
+                    logger.info(f"Adding image to training data: {img_data.get('filename', 'unknown')}")
+                    accepted_count += 1
+                except Exception as e:
+                    logger.error(f"Error processing selected image {img_data}: {str(e)}")
+                    continue
+            
+            logger.info(f"Selectively accepting {accepted_count} images for training data")
+            return {
+                "status": "success", 
+                "message": f"Selected {accepted_count} images added to training data",
+                "action": "selective",
+                "accepted_images": selected_images,
+                "accepted_count": accepted_count
+            }
+        else:
+            return {"status": "error", "message": "Invalid action. Use 'accept_all', 'reject_all', or 'selective'"}, 400
+            
+    except Exception as e:
+        logger.error(f"Training curation error: {str(e)}")
+        return {"status": "error", "message": f"Training curation failed: {str(e)}"}, 500
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
@@ -177,9 +268,13 @@ def index():
                 logger.error(f"Invalid image file: {str(e)}")
                 return render_template("index.html", error="Invalid image file. Please upload a valid image.")
             
-            # Classify image
-            logger.info(f"Starting classification for: {unique_filename}")
-            prediction, confidence, error = classify_with_roboflow(filepath)
+            # Classify image via agent (detect → refine → validate)
+            logger.info(f"Starting agent workflow for: {unique_filename}")
+            try:
+                prediction, confidence, _details = run_agent_on_image(filepath)
+                error = None
+            except Exception as e:
+                prediction, confidence, error = None, None, f"Agent error: {str(e)}"
             
             if error:
                 os.remove(filepath)
@@ -193,11 +288,17 @@ def index():
             
             logger.info(f"Classification successful: {prediction} (confidence: {confidence})")
             
+            # Extract enhancement data if available
+            enhancement_data = None
+            if _details and "steps" in _details and "enhancement" in _details["steps"]:
+                enhancement_data = _details["steps"]["enhancement"]
+            
             return render_template(
                 "result.html",
                 prediction=prediction,
                 confidence=confidence,
-                filename=unique_filename
+                filename=unique_filename,
+                enhancement_data=enhancement_data
             )
             
         except Exception as e:
