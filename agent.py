@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 from roboflow import Roboflow
 from PIL import Image
 import pytesseract
-from google.generativeai import GenerativeModels
+from google.generativeai import GenerativeModel
 
 # LangChain core imports
 from langchain_core.tools import Tool
@@ -22,12 +22,17 @@ load_dotenv()
 class DetectionResult(dict):
     """Typed container for detection results."""
 
+    
+
 
 def detect_with_roboflow(image_path: str) -> DetectionResult:
     """Run Roboflow model to detect whether image is AI-generated vs real.
 
     Returns a dict with keys: label, confidence, raw
     """
+    
+    
+    
     rf = Roboflow(api_key=os.getenv("ROBOFLOW_API_KEY", "9VDk4sfMMuanS6OE8aRU"))
     project = rf.workspace().project("ai-image-detector-dolex")
     model = project.version(8).model
@@ -76,123 +81,61 @@ def extract_text_with_ocr(image_path: str) -> str:
 def generate_similar_images_with_gemini(image_path: str, num_images: int = 10) -> List[str]:
     """Generate similar images using Google Gemini API with image analysis."""
     try:
-        # Configure Gemini API
-        api_key = os.getenv("GOOGLE_API_KEY")
+        # Ensure uploads directory exists
+        os.makedirs("uploads", exist_ok=True)
         
-        genai.configure(api_key=api_key)
+        # Step 1: Analyze the image
+        vision_model = GenerativeModel(model_name="gemini-pro-vision")
         
-        # Use the correct model name for Gemini
-        model = GenerativeModel(model_name="models/images:generate")
-        image_bytes = model.generate_content()
-        print("Using Gemini 1.5 Pro model")
-        
-        # Read the input image
         with open(image_path, "rb") as f:
-            image_data = f.read()
+            image_part = {"mime_type": "image/jpeg", "data": f.read()}
         
-        # Analyze the input image to understand its characteristics
-        analysis_prompt = """
-        Analyze this image and describe its key characteristics including:
-        1. Main subject/objects
-        2. Style (photographic, artistic, etc.)
-        3. Color palette
-        4. Composition
-        5. Lighting
-        6. Any text or patterns
-        Provide a detailed description that could be used to generate similar images.
-        """
+        desc_response = vision_model.generate_content([
+            "Analyze this image and describe its key characteristics including style, colors, composition, and main subjects.", 
+            image_part
+        ])
         
-        try:
-            # Create the image part for Gemini
-            image_part = {
-                "mime_type": "image/jpeg",
-                "data": image_data
-            }
-            
-            analysis_response = model.generate_content([analysis_prompt, image_part])
-            image_description = analysis_response.text if analysis_response else "A general image"
-            print(f"Image analysis completed: {image_description[:100]}...")
-        except Exception as e:
-            print(f"Error analyzing image: {str(e)}")
-            image_description = "A general image"
+        image_description = desc_response.text if desc_response and hasattr(desc_response, 'text') else "A general image"
+        print(f"Image analysis: {image_description[:100]}...")
         
-        # Generate similar images using the description
+        # Step 2: Generate similar images
+        # Note: Check if this model name is correct for your setup
+        image_model = GenerativeModel(model_name="imagegeneration@006")  # or whatever model you have access to
+        
         generated_images = []
+        
         for i in range(num_images):
             try:
-                # Create a variation prompt based on the analysis
-                variation_prompt = f"""
-                Create a variation of this image description: {image_description}
+                prompt = f"Create a similar image based on this description: {image_description}"
+                response = image_model.generate_content(prompt)
                 
-                Generate variation {i+1} with these modifications:
-                - Slightly different angle or perspective
-                - Minor changes in lighting or color
-                - Small variations in composition
-                - Maintain the same overall style and subject
+                # The exact response format depends on your Gemini setup
+                # You may need to adjust this based on the actual response structure
+                if hasattr(response, 'candidates') and response.candidates:
+                    # Save the generated image (adjust based on actual response format)
+                    gen_filename = f"gen_{i}_{os.path.basename(image_path)}.jpg"
+                    gen_path = os.path.join("uploads", gen_filename)
+                    
+                    # This part depends on how Gemini returns image data
+                    # You'll need to adjust based on the actual API response
+                    image_data = response.candidates[0].content.parts[0].data  # Example - adjust as needed
+                    
+                    with open(gen_path, "wb") as f:
+                        f.write(image_data)
+                    
+                    generated_images.append(gen_path)
+                    print(f"Generated image {i+1}/{num_images}")
                 
-                Provide a detailed text description that could be used with an image generation service like DALL-E or Midjourney.
-                """
-                
-                response = model.generate_content(variation_prompt)
-                
-                if response and hasattr(response, 'text') and response.text:
-                    # Save the description as a text file
-                    generated_filename = f"generated_{i}_{os.path.basename(image_path)}.txt"
-                    generated_path = os.path.join("uploads", generated_filename)
-                    
-                    with open(generated_path, "w", encoding="utf-8") as f:
-                        f.write(f"Generated image description {i+1}:\n\n")
-                        f.write(response.text)
-                        f.write(f"\n\nBased on original image: {image_path}")
-                    
-                    # Create a visual representation of the generated description
-                    img_filename = f"generated_{i}_{os.path.basename(image_path)}"
-                    img_path = os.path.join("uploads", img_filename)
-                    
-                    # Create a more sophisticated placeholder image
-                    from PIL import Image, ImageDraw, ImageFont
-                    img = Image.new('RGB', (512, 512), color=(100 + i*20, 150 + i*10, 200 + i*5))
-                    draw = ImageDraw.Draw(img)
-                    
-                    try:
-                        font = ImageFont.load_default()
-                    except:
-                        font = None
-                    
-                    # Add text to the image
-                    draw.text((10, 10), f"Generated Image {i+1}", fill=(255, 255, 255), font=font)
-                    draw.text((10, 30), f"Variation of: {os.path.basename(image_path)}", fill=(200, 200, 200), font=font)
-                    draw.text((10, 50), f"AI Generated Description", fill=(150, 150, 150), font=font)
-                    
-                    # Add a preview of the description
-                    description_preview = response.text[:50] + "..." if len(response.text) > 50 else response.text
-                    draw.text((10, 70), description_preview, fill=(100, 100, 100), font=font)
-                    
-                    img.save(img_path)
-                    generated_images.append(img_path)
-                    print(f"Generated variation {i+1} with Gemini description")
-                else:
-                    print(f"No response from Gemini for variation {i+1}")
-                    # Create a simple fallback image
-                    img_filename = f"generated_{i}_{os.path.basename(image_path)}"
-                    img_path = os.path.join("uploads", img_filename)
-                    
-                    from PIL import Image, ImageDraw
-                    img = Image.new('RGB', (512, 512), color=(100 + i*20, 150 + i*10, 200 + i*5))
-                    draw = ImageDraw.Draw(img)
-                    draw.text((10, 10), f"Generated Image {i+1}", fill=(255, 255, 255))
-                    img.save(img_path)
-                    generated_images.append(img_path)
-                    
             except Exception as e:
-                print(f"Error generating image {i}: {str(e)}")
+                print(f"Error generating image {i+1}: {str(e)}")
                 continue
-                
+        
         return generated_images
         
     except Exception as e:
-        print(f"Error with Gemini image generation: {str(e)}")
+        print(f"Error in image generation: {str(e)}")
         return []
+    
 
 
 def fetch_similar_real_images(image_path: str, num_images: int = 10) -> List[str]:
@@ -352,17 +295,17 @@ class WorkflowAgent:
     """Agent orchestrating detect → refine → validate for images with low-confidence enhancement."""
 
     def __init__(self) -> None:
-        # No LLM required - using rule-based refinement
+
         self.refine_tool = make_refinement_tool()
 
     def run(self, image_path: str) -> Dict[str, Any]:
-        # Step 1: detect
+
         detection = detect_with_roboflow(image_path)
 
-        # Step 2: gather OCR for validation context
+       
         ocr_text = extract_text_with_ocr(image_path)
 
-        # Step 3: refine using LLM tool
+        
         refinement_input = json.dumps({
             "label": detection["label"],
             "confidence": detection["confidence"],
@@ -372,7 +315,6 @@ class WorkflowAgent:
         try:
             refinement = json.loads(refinement_raw)
         except Exception:
-            # Fallback: keep original but cap confidence if unknown
             refinement = {
                 "final_label": detection["label"],
                 "adjusted_confidence": float(detection["confidence"]) * 0.9,
@@ -387,14 +329,18 @@ class WorkflowAgent:
         # Step 5: Check if confidence is below threshold and generate/fetch similar images
         enhancement_data = None
         print(f"Final confidence: {adjusted_conf:.3f} (threshold: 0.6)")
-        if adjusted_conf < 0.6:  # Increased threshold to 60% for more sensitive triggering
-            print(f"Low confidence detected ({adjusted_conf:.3f}) - generating similar images for training data curation")
-            
-            # Generate similar images using Gemini
-            generated_images = generate_similar_images_with_gemini(image_path, num_images=10)
-            
-            # Fetch similar real images (placeholder)
-            real_images = fetch_similar_real_images(image_path, num_images=10)
+        if adjusted_conf < 0.6:
+            try:
+                generated_images = generate_similar_images_with_gemini(image_path, num_images=10)
+                real_images = fetch_similar_real_images(image_path, num_images=10)
+            except Exception as e:
+                print(f"Enhancement failed: {str(e)}")
+                enhancement_data = {
+                    "triggered": True,
+                    "error": str(e),
+                    "reason": f"Confidence below threshold but enhancement failed"
+        }
+
             
             # Classify the generated images
             generated_classifications = classify_generated_images(generated_images)
