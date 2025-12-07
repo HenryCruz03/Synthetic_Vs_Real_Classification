@@ -10,6 +10,8 @@ from roboflow import Roboflow
 from PIL import Image
 import pytesseract
 from google.generativeai import GenerativeModel
+from google.generativeai import list_models
+
 
 # LangChain core imports
 from langchain_core.tools import Tool
@@ -17,6 +19,8 @@ from langchain_core.prompts import ChatPromptTemplate
 
 
 load_dotenv()
+
+
 
 
 class DetectionResult(dict):
@@ -78,175 +82,240 @@ def extract_text_with_ocr(image_path: str) -> str:
         return ""
 
 
-def generate_similar_images_with_gemini(image_path: str, num_images: int = 10) -> List[str]:
-    """Generate similar images using Google Gemini API with image analysis."""
+def generate_similar_images_with_gemini(image_path: str, num_images: int = 3) -> List[str]:
+    """
+    Analyze an image with Gemini models for a descriptive text,
+    then generate similar images using NanoBanana.
+    Returns a list of filepaths to the generated images.
+    """
+
+    ANALYSIS_MODEL = "models/gemini-2.5-flash-image-preview"
+    GENERATION_MODEL = "models/nano-banana-pro-preview"
+    os.makedirs("uploads", exist_ok=True)
+    generated_images = []
+    # === Step 1: Analyze the input image ===
     try:
-        # Ensure uploads directory exists
-        os.makedirs("uploads", exist_ok=True)
-        
-        # Step 1: Analyze the image
-        vision_model = GenerativeModel(model_name="gemini-pro-vision")
-        
+        vision_model = GenerativeModel(model_name=ANALYSIS_MODEL)
         with open(image_path, "rb") as f:
             image_part = {"mime_type": "image/jpeg", "data": f.read()}
-        
-        desc_response = vision_model.generate_content([
-            "Analyze this image and describe its key characteristics including style, colors, composition, and main subjects.", 
+        desc_response = vision_model.generate_content([ 
+            "Analyze this image and describe its key characteristics including style, colors, composition, and main subjects.",
             image_part
         ])
-        
-        image_description = desc_response.text if desc_response and hasattr(desc_response, 'text') else "A general image"
-        print(f"Image analysis: {image_description[:100]}...")
-        
-        # Step 2: Generate similar images
-        # Note: Check if this model name is correct for your setup
-        image_model = GenerativeModel(model_name="imagegeneration@006")  # or whatever model you have access to
-        
-        generated_images = []
-        
-        for i in range(num_images):
-            try:
-                prompt = f"Create a similar image based on this description: {image_description}"
-                response = image_model.generate_content(prompt)
-                
-                # The exact response format depends on your Gemini setup
-                # You may need to adjust this based on the actual response structure
-                if hasattr(response, 'candidates') and response.candidates:
-                    # Save the generated image (adjust based on actual response format)
-                    gen_filename = f"gen_{i}_{os.path.basename(image_path)}.jpg"
-                    gen_path = os.path.join("uploads", gen_filename)
-                    
-                    # This part depends on how Gemini returns image data
-                    # You'll need to adjust based on the actual API response
-                    image_data = response.candidates[0].content.parts[0].data  # Example - adjust as needed
-                    
-                    with open(gen_path, "wb") as f:
-                        f.write(image_data)
-                    
-                    generated_images.append(gen_path)
-                    print(f"Generated image {i+1}/{num_images}")
-                
-            except Exception as e:
-                print(f"Error generating image {i+1}: {str(e)}")
-                continue
-        
-        return generated_images
-        
+        image_description = desc_response.text if hasattr(desc_response, 'text') and desc_response.text else "A general image"
+        print(f"Image analysis: {image_description[:120]}...")
     except Exception as e:
-        print(f"Error in image generation: {str(e)}")
-        return []
-    
-
-
-def fetch_similar_real_images(image_path: str, num_images: int = 10) -> List[str]:
+        print(f"Error during analysis: {e}")
+        image_description = "A general image"
+    # === Step 2: Generate similar images ===
+    generation_model = GenerativeModel(model_name=GENERATION_MODEL)
+    for i in range(num_images):
+        try:
+            prompt = f"Create a similar image based on this description: {image_description}"
+            response = generation_model.generate_content(prompt)
+            # Parse candidates for image data
+            if hasattr(response, 'candidates') and response.candidates:
+                for candidate in response.candidates:
+                    for part in candidate.content.parts:
+                        img_b64 = None
+                        if hasattr(part, "inline_data") and hasattr(part.inline_data, "data"):
+                            img_b64 = part.inline_data.data
+                        elif hasattr(part, "data"):
+                            img_b64 = part.data
+                        if img_b64:
+                            img_bytes = base64.b64decode(img_b64)
+                            gen_filename = f"nanobanana_gen_{i}_{os.path.basename(image_path)}.jpg"
+                            gen_path = os.path.join("uploads", gen_filename)
+                            with open(gen_path, "wb") as out_img:
+                                out_img.write(img_bytes)
+                            generated_images.append(gen_path)
+                            print(f"Generated image {i+1}/{num_images}")
+            else:
+                print("No image candidates in NanoBanana response.")
+        except Exception as e:
+            print(f"Error generating image {i+1}: {str(e)}")
+            continue
+    return generated_images
+def fetch_similar_real_images(image_path: str, num_images: int = 3) -> List[str]:
     """Fetch similar real images using Google Custom Search API."""
-    try:
-        # Use Google Custom Search API to find similar real images
-        api_key = os.getenv("GOOGLE_API_KEY")
-        search_engine_id = os.getenv("GOOGLE_SEARCH_ENGINE_ID")  # You'll need to create a Custom Search Engine
-        
-        if not api_key or not search_engine_id:
-            print("Google Custom Search API not configured - skipping real image search")
-            return []
-        
-        # Extract text from the image for search query
-        ocr_text = extract_text_with_ocr(image_path)
-        search_query = f"real photo {ocr_text}".strip() if ocr_text else "real photograph"
-        
-        # Search for similar images
-        search_url = "https://www.googleapis.com/customsearch/v1"
-        params = {
-            'key': api_key,
-            'cx': search_engine_id,
-            'q': search_query,
-            'searchType': 'image',
-            'num': min(num_images, 10),  # Google Custom Search limits to 10 per request
-            'imgType': 'photo',
-            'imgSize': 'medium'
-        }
-        
-        response = requests.get(search_url, params=params)
-        if response.status_code == 200:
-            data = response.json()
-            real_images = []
-            
-            for i, item in enumerate(data.get('items', [])):
-                try:
-                    # Download the image
-                    img_url = item['link']
-                    img_response = requests.get(img_url, timeout=10)
-                    
-                    if img_response.status_code == 200:
-                        # Save the image
-                        real_filename = f"real_{i}_{os.path.basename(image_path)}"
-                        real_path = os.path.join("uploads", real_filename)
-                        
-                        with open(real_path, "wb") as f:
-                            f.write(img_response.content)
-                        
-                        real_images.append(real_path)
-                        
-                except Exception as e:
-                    print(f"Error downloading real image {i}: {str(e)}")
-                    continue
-            
-            return real_images
-        else:
-            print(f"Google Custom Search API error: {response.status_code}")
-            return []
-        
-    except Exception as e:
-        print(f"Error fetching similar real images: {str(e)}")
-        return []
 
+    try:
+
+        # Use Google Custom Search API to find similar real images
+
+        api_key = os.getenv("GOOGLE_CUSTOM_SEARCH_API_KEY")  # Ensure this is set correctly
+
+        search_engine_id = os.getenv("GOOGLE_SEARCH_ENGINE_ID")  # You'll need to create a Custom Search Engine
+
+        if not api_key or not search_engine_id:
+
+            print("Google Custom Search API not configured - skipping real image search")
+
+            return []
+
+        # Extract text from the image for search query
+
+        ocr_text = extract_text_with_ocr(image_path)
+
+        search_query = f"real photo {ocr_text}".strip() if ocr_text else "real photograph"
+
+        # Search for similar images
+
+        search_url = "https://www.googleapis.com/customsearch/v1"
+
+        params = {
+
+            'key': api_key,
+
+            'cx': search_engine_id,
+
+            'q': search_query,
+
+            'searchType': 'image',
+
+            'num': min(num_images, 3),  # Google Custom Search limits to 10 per request
+
+            'imgType': 'photo',
+
+            'imgSize': 'medium'
+
+        }
+
+        response = requests.get(search_url, params=params)
+
+        if response.status_code == 200:
+
+            data = response.json()
+
+            real_images = []
+
+            for i, item in enumerate(data.get('items', [])):
+
+                try:
+
+                    # Download the image
+
+                    img_url = item['link']
+
+                    img_response = requests.get(img_url, timeout=10)
+
+                    if img_response.status_code == 200:
+
+                        # Save the image
+
+                        real_filename = f"real_{i}_{os.path.basename(image_path)}"
+
+                        real_path = os.path.join("uploads", real_filename)
+
+                        with open(real_path, "wb") as f:
+
+                            f.write(img_response.content)
+
+                        real_images.append(real_path)
+
+                except Exception as e:
+
+                    print(f"Error downloading real image {i}: {str(e)}")
+
+                    continue
+
+            return real_images
+
+        else:
+
+            print(f"Google Custom Search API error: {response.status_code}")
+
+            return []
+
+    except Exception as e:
+
+        print(f"Error fetching similar real images: {str(e)}")
+
+        return []
 
 def classify_generated_images(image_paths: List[str]) -> List[Dict[str, Any]]:
     """Classify a list of generated images and return results."""
+
     results = []
-    
+
     for image_path in image_paths:
+
         try:
+
             # Check if file exists and is valid
+
             if not os.path.exists(image_path):
+
                 results.append({
+
                     "image_path": image_path,
+
                     "label": "file_not_found",
+
                     "confidence": 0.0,
+
                     "error": "Image file does not exist"
+
                 })
+
                 continue
-            
+
             # Validate image file
+
             try:
+
                 with Image.open(image_path) as img:
+
                     img.verify()
+
             except Exception as e:
+
                 results.append({
+
                     "image_path": image_path,
+
                     "label": "invalid_image",
+
                     "confidence": 0.0,
+
                     "error": f"Invalid image file: {str(e)}"
+
                 })
+
                 continue
-            
+
             # Use the same detection logic as the main agent
+
             detection = detect_with_roboflow(image_path)
+
             results.append({
+
                 "image_path": image_path,
+
                 "label": detection["label"],
+
                 "confidence": detection["confidence"],
+
                 "filename": os.path.basename(image_path)
+
             })
-            
+
         except Exception as e:
+
             results.append({
+
                 "image_path": image_path,
+
                 "label": "classification_error",
+
                 "confidence": 0.0,
+
                 "error": str(e),
+
                 "filename": os.path.basename(image_path)
+
             })
-    
+
     return results
 
 
@@ -331,8 +400,8 @@ class WorkflowAgent:
         print(f"Final confidence: {adjusted_conf:.3f} (threshold: 0.6)")
         if adjusted_conf < 0.6:
             try:
-                generated_images = generate_similar_images_with_gemini(image_path, num_images=10)
-                real_images = fetch_similar_real_images(image_path, num_images=10)
+                generated_images = generate_similar_images_with_gemini(image_path, num_images=3)
+                real_images = fetch_similar_real_images(image_path, num_images=3)
             except Exception as e:
                 print(f"Enhancement failed: {str(e)}")
                 enhancement_data = {

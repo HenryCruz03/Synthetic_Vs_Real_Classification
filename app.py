@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 # Initialize Roboflow client
 
 ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY")
-
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
