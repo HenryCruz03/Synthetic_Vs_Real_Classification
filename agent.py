@@ -4,14 +4,19 @@ import requests
 import base64
 from typing import Any, Dict, List, Optional, Tuple
 from io import BytesIO
+import time
 
 from dotenv import load_dotenv
 from roboflow import Roboflow
-from PIL import Image
+from PIL import Image as PILImage
+
 import pytesseract
 from google.generativeai import GenerativeModel
 from google.generativeai import list_models
 
+from google.cloud import aiplatform
+from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 
 # LangChain core imports
 from langchain_core.tools import Tool
@@ -19,6 +24,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 
 load_dotenv()
+
 
 
 
@@ -73,10 +79,83 @@ def detect_with_roboflow(image_path: str) -> DetectionResult:
     return DetectionResult(label=normalized, confidence=confidence, raw=result_json)
 
 
+def _classify(image_paths: List[str]) -> List[Dict[str, Any]]:
+    """
+    Classify a list of images using Roboflow and generate similar images.
+    Returns a list of classification results with generated image filenames.
+    """
+    classifications = []
+    
+    for img_path in image_paths:
+        try:
+            # Classify the image
+            result = detect_with_roboflow(img_path)
+            
+            # Track generated images for this classification
+            generated_images = []
+            
+            # Generate similar images (one at a time to avoid quota)
+            predicted_class = result["label"]
+            num_images_to_generate = 3
+            
+            print(f"🎨 Generating {num_images_to_generate} similar images for class: {predicted_class}")
+            
+            for i in range(num_images_to_generate):
+                try:
+                    # Generate single image
+                    image_bytes = generate_similar_images_with_gemini(
+                        predicted_class=predicted_class,
+                        original_image_path=img_path
+                    )
+                    
+                    # Create unique filename
+                    timestamp = int(time.time())
+                    filename = f"generated_{predicted_class}_{timestamp}_{i}.jpg"
+                    filepath = os.path.join('uploads', filename)
+                    
+                    # Save the image
+                    with open(filepath, 'wb') as f:
+                        f.write(image_bytes)
+                    
+                    # Track the filename (just the name, not full path)
+                    generated_images.append(filename)
+                    
+                    print(f"  ✓ Generated and saved: {filename}")
+                    
+                    # Cooldown to avoid quota limits
+                    if i < num_images_to_generate - 1:  # Don't sleep after last image
+                        time.sleep(2)
+                        
+                except Exception as gen_error:
+                    print(f"  ❌ Error generating image {i+1}: {gen_error}")
+            
+            # Add classification result with generated images
+            classifications.append({
+                "image_path": img_path,
+                "label": result["label"],
+                "confidence": result["confidence"],
+                "generated_images": generated_images  # ← NEW: Include generated filenames
+            })
+            
+            print(f"✓ Classified {os.path.basename(img_path)}: {result['label']} ({result['confidence']:.3f})")
+            print(f"  Generated {len(generated_images)} images")
+            
+        except Exception as e:
+            print(f"❌ Error classifying {img_path}: {e}")
+            classifications.append({
+                "image_path": img_path,
+                "label": "unknown",
+                "confidence": 0.0,
+                "generated_images": [],  # ← Empty list on error
+                "error": str(e)
+            })
+    
+    return classifications
+
 def extract_text_with_ocr(image_path: str) -> str:
     """Extracts text from the image using Tesseract OCR."""
     try:
-        with Image.open(image_path) as img:
+        with PILImage.open(image_path) as img:
             return pytesseract.image_to_string(img)
     except Exception:
         return ""
@@ -85,57 +164,147 @@ def extract_text_with_ocr(image_path: str) -> str:
 def generate_similar_images_with_gemini(image_path: str, num_images: int = 3) -> List[str]:
     """
     Analyze an image with Gemini models for a descriptive text,
-    then generate similar images using NanoBanana.
+    then generate similar images using Vertex AI Imagen via REST.
     Returns a list of filepaths to the generated images.
     """
-
     ANALYSIS_MODEL = "models/gemini-2.5-flash-image-preview"
-    GENERATION_MODEL = "models/nano-banana-pro-preview"
+    PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT_ID", "your-project-id")
+    LOCATION = "us-central1"
     os.makedirs("uploads", exist_ok=True)
-    generated_images = []
-    # === Step 1: Analyze the input image ===
+    generated_images: List[str] = []
+    # === Step 1: Analyze the input image (same as before) ===
     try:
         vision_model = GenerativeModel(model_name=ANALYSIS_MODEL)
         with open(image_path, "rb") as f:
             image_part = {"mime_type": "image/jpeg", "data": f.read()}
-        desc_response = vision_model.generate_content([ 
+        desc_response = vision_model.generate_content([
             "Analyze this image and describe its key characteristics including style, colors, composition, and main subjects.",
-            image_part
+            image_part,
         ])
-        image_description = desc_response.text if hasattr(desc_response, 'text') and desc_response.text else "A general image"
+        image_description = (
+            desc_response.text
+            if hasattr(desc_response, "text") and desc_response.text
+            else "A general image"
+        )
         print(f"Image analysis: {image_description[:120]}...")
     except Exception as e:
         print(f"Error during analysis: {e}")
         image_description = "A general image"
-    # === Step 2: Generate similar images ===
-    generation_model = GenerativeModel(model_name=GENERATION_MODEL)
+    # === Step 2: Generate similar images using REST Imagen helper ===
     for i in range(num_images):
+        prompt = f"Create a similar image based on this description: {image_description}"
+        print(f"Requesting image {i+1}/{num_images} with prompt: {prompt}")
+    
         try:
-            prompt = f"Create a similar image based on this description: {image_description}"
-            response = generation_model.generate_content(prompt)
-            # Parse candidates for image data
-            if hasattr(response, 'candidates') and response.candidates:
-                for candidate in response.candidates:
-                    for part in candidate.content.parts:
-                        img_b64 = None
-                        if hasattr(part, "inline_data") and hasattr(part.inline_data, "data"):
-                            img_b64 = part.inline_data.data
-                        elif hasattr(part, "data"):
-                            img_b64 = part.data
-                        if img_b64:
-                            img_bytes = base64.b64decode(img_b64)
-                            gen_filename = f"nanobanana_gen_{i}_{os.path.basename(image_path)}.jpg"
-                            gen_path = os.path.join("uploads", gen_filename)
-                            with open(gen_path, "wb") as out_img:
-                                out_img.write(img_bytes)
-                            generated_images.append(gen_path)
-                            print(f"Generated image {i+1}/{num_images}")
-            else:
-                print("No image candidates in NanoBanana response.")
+            image_bytes = _generate_reliable_imagen(prompt, PROJECT_ID, LOCATION)
+            if not image_bytes:
+                print(f"❌ Imagen generation returned no bytes for image {i+1}")
+                continue
+        # Save the image (PIL verification already done in _generate_reliable_imagen)
+            gen_filename = f"imagen4_gen_{i}_{os.path.basename(image_path)}.jpg"
+            gen_path = os.path.join("uploads", gen_filename)
+            with open(gen_path, "wb") as out_img:
+                out_img.write(image_bytes)
+            generated_images.append(gen_path)
+            print(f"✅ Successfully generated and saved: {gen_path}")
+        
+        # Add delay between requests to avoid hitting quota
+            if i < num_images - 1:  # Don't wait after the last image
+                print(f"⏳ Waiting 3 seconds before next request...")
+                time.sleep(3)
         except Exception as e:
-            print(f"Error generating image {i+1}: {str(e)}")
-            continue
+            print(f"Error generating image {i+1}: {e}")
+        # Still wait even on error to avoid hammering the API
+            if i < num_images - 1:
+                time.sleep(2)
     return generated_images
+
+def _generate_reliable_imagen(prompt: str, project_id: str, location: str) -> Optional[bytes]:
+    """
+    Generate 3 images using Vertex AI Imagen via REST.
+    Returns list of image bytes that are PIL-decodable.
+    """
+    try:
+        # Get credentials
+        credentials = None
+        if os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+            credentials = service_account.Credentials.from_service_account_file(
+                os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+        else:
+            from google.auth import default
+            credentials, _ = default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+
+        credentials.refresh(Request())
+        access_token = credentials.token
+
+        url = (
+            f"https://{location}-aiplatform.googleapis.com/v1/"
+            f"projects/{project_id}/locations/{location}/publishers/google/"
+            f"models/imagen-3.0-generate-001:predict"
+        )
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "instances": [
+                {
+                    "prompt": prompt,
+                    "aspectRatio": "1:1",
+                    "safetySettings": [
+                        {"category": "HATE", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                        {"category": "HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                        {"category": "SEXUAL", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                        {"category": "DANGEROUS", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+                    ],
+                }
+            ],
+            "parameters": {
+                "sampleCount": 1,  # Generate 1 images in one call
+            },
+        }
+
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
+
+        if resp.status_code != 200:
+            print(f"Imagen API error: {resp.status_code} - {resp.text}")
+            return None
+
+        data = resp.json()
+        preds = data.get("predictions") or []
+        if not preds:
+            print(f"Imagen response has no predictions: {data}")
+            return None
+
+       
+        # Extract the single image
+        if not preds:
+            return None
+    
+        pred = preds[0]
+        img_b64 = pred.get("bytesBase64Encoded")
+        if not img_b64:
+            print(f"No bytesBase64Encoded in prediction")
+            return None
+        try:
+            img_bytes = base64.b64decode(img_b64)
+            test_img = PILImage.open(BytesIO(img_bytes))
+            test_img.verify()
+            print(f"✓ Successfully generated and decoded image")
+            return img_bytes  # Return single bytes object, not list
+        except Exception as e:
+            print(f"❌ Error decoding image: {e}")
+            return None
+
+    except Exception as e:
+        print(f"Error in _generate_reliable_imagen: {e}")
+        return None
+
+
 def fetch_similar_real_images(image_path: str, num_images: int = 3) -> List[str]:
     """Fetch similar real images using Google Custom Search API."""
 
@@ -232,91 +401,78 @@ def fetch_similar_real_images(image_path: str, num_images: int = 3) -> List[str]
         print(f"Error fetching similar real images: {str(e)}")
 
         return []
-
-def classify_generated_images(image_paths: List[str]) -> List[Dict[str, Any]]:
-    """Classify a list of generated images and return results."""
-
-    results = []
-
-    for image_path in image_paths:
-
-        try:
-
-            # Check if file exists and is valid
-
-            if not os.path.exists(image_path):
-
-                results.append({
-
-                    "image_path": image_path,
-
-                    "label": "file_not_found",
-
-                    "confidence": 0.0,
-
-                    "error": "Image file does not exist"
-
-                })
-
-                continue
-
-            # Validate image file
-
-            try:
-
-                with Image.open(image_path) as img:
-
-                    img.verify()
-
-            except Exception as e:
-
-                results.append({
-
-                    "image_path": image_path,
-
-                    "label": "invalid_image",
-
-                    "confidence": 0.0,
-
-                    "error": f"Invalid image file: {str(e)}"
-
-                })
-
-                continue
-
-            # Use the same detection logic as the main agent
-
-            detection = detect_with_roboflow(image_path)
-
-            results.append({
-
-                "image_path": image_path,
-
-                "label": detection["label"],
-
-                "confidence": detection["confidence"],
-
-                "filename": os.path.basename(image_path)
-
-            })
-
-        except Exception as e:
-
-            results.append({
-
-                "image_path": image_path,
-
-                "label": "classification_error",
-
-                "confidence": 0.0,
-
-                "error": str(e),
-
-                "filename": os.path.basename(image_path)
-
-            })
-
-    return results
+def upload_to_roboflow_for_training(image_path: str, label: str) -> bool:
+    """
+    Upload an image to Roboflow for training data.
+    
+    Args:
+        image_path: Path to the image file
+        label: Label for the image ("AI-Generated Image" or "Real Image")
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        api_key = os.getenv("ROBOFLOW_API_KEY")
+       
+        project = "ai-image-detector-dolex"
+        
+        # Roboflow upload API endpoint
+        upload_url = f"https://api.roboflow.com/dataset/{project}/upload"
+        
+        # Normalize label to match Roboflow classes
+        roboflow_label = "ai-generated" if "AI-Generated" in label else "real"
+        
+        params = {
+            "api_key": api_key,
+            "name": os.path.basename(image_path),
+            "split": "train",  # or "valid" or "test"
+        }
+        
+        # Read and encode the image
+        with open(image_path, "rb") as image_file:
+            # Upload as multipart form data
+            files = {
+                "file": image_file
+            }
+            
+            response = requests.post(
+                upload_url,
+                params=params,
+                files=files,
+                timeout=30
+            )
+        
+        if response.status_code == 200:
+            result = response.json()
+            image_id = result.get("id")
+            
+            # Now annotate the image with the label
+            annotate_url = f"https://api.roboflow.com/dataset/{project}/annotate/{image_id}"
+            annotation_data = {
+                "api_key": api_key,
+                "name": roboflow_label,
+                # For classification, we just need the label
+                "annotation": {
+                    "classification": roboflow_label
+                }
+            }
+            
+            anno_response = requests.post(annotate_url, json=annotation_data, timeout=30)
+            
+            if anno_response.status_code == 200:
+                print(f"✅ Successfully uploaded and annotated {os.path.basename(image_path)} as '{roboflow_label}'")
+                return True
+            else:
+                print(f"❌ Failed to annotate image: {anno_response.status_code} - {anno_response.text}")
+                return False
+        else:
+            print(f"❌ Failed to upload image: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error uploading to Roboflow: {e}")
+        return False
 
 
 def make_refinement_tool() -> Tool:
@@ -402,6 +558,49 @@ class WorkflowAgent:
             try:
                 generated_images = generate_similar_images_with_gemini(image_path, num_images=3)
                 real_images = fetch_similar_real_images(image_path, num_images=3)
+        
+        # Classify the generated images
+                generated_classifications = _classify(generated_images)
+                real_classifications = _classify(real_images)
+    
+                upload_results = {
+                "generated": [],
+                "real": []
+                }
+                print("\n=== Uploading to Roboflow for Training ===")
+                for classification in generated_classifications:
+                    success = upload_to_roboflow_for_training(
+                        classification["image_path"],
+                        classification["label"]
+    )
+                    upload_results["generated"].append({
+                        "image": os.path.basename(classification["image_path"]),
+                        "success": success
+    })
+                for classification in real_classifications:
+                    success = upload_to_roboflow_for_training(
+                        classification["image_path"],
+                        classification["label"]
+    )
+                    upload_results["real"].append({
+                        "image": os.path.basename(classification["image_path"]),
+                        "success": success
+    })  
+                print(f"Upload Summary: {sum(r['success'] for r in upload_results['generated'])} generated, "f"{sum(r['success'] for r in upload_results['real'])} real images uploaded")
+        
+                enhancement_data = {
+                        "triggered": True,
+                        "reason": f"Confidence below threshold (0.6f): {adjusted_conf:.3f}",
+                        "generated_images": generated_classifications,
+                        "real_images": real_classifications,
+                        "generated_image_urls": [f"/uploads/{os.path.basename(img)}" for img in generated_images],
+                        "real_image_urls": [f"/uploads/{os.path.basename(img)}" for img in real_images],
+                        "total_generated": len(generated_images),
+                        "total_real": len(real_images),
+                        "upload_results": upload_results,
+                        "recommendation": self._generate_training_recommendation(generated_classifications, real_classifications)
+
+        }
             except Exception as e:
                 print(f"Enhancement failed: {str(e)}")
                 enhancement_data = {
@@ -409,26 +608,13 @@ class WorkflowAgent:
                     "error": str(e),
                     "reason": f"Confidence below threshold but enhancement failed"
         }
-
-            
-            # Classify the generated images
-            generated_classifications = classify_generated_images(generated_images)
-            real_classifications = classify_generated_images(real_images)
-            
-            enhancement_data = {
-                "triggered": True,
-                "reason": f"Confidence below threshold (0.5): {adjusted_conf:.3f}",
-                "generated_images": generated_classifications,
-                "real_images": real_classifications,
-                "total_generated": len(generated_images),
-                "total_real": len(real_images),
-                "recommendation": self._generate_training_recommendation(generated_classifications, real_classifications)
-            }
         else:
             enhancement_data = {
                 "triggered": False,
-                "reason": f"Confidence above threshold (0.5): {adjusted_conf:.3f}"
-            }
+                "reason": f"Confidence above threshold (0.6): {adjusted_conf:.3f}"
+    }
+            
+            
 
         return {
             "steps": {
@@ -465,7 +651,7 @@ class WorkflowAgent:
             return "Generated images have unclear classifications. Manual review recommended before adding to training data."
 
 
-
+ 
 def run_agent_on_image(image_path: str) -> Tuple[str, float, Dict[str, Any]]:
     agent = WorkflowAgent()
     result = agent.run(image_path)

@@ -1,15 +1,18 @@
 {% extends "base.html" %}
+
 {% block content %}
+
 <div class="result-container">
+
     <div class="result-header">
         <h2>🎯 Classification Result</h2>
         <p>AI Analysis Complete</p>
     </div>
-    
+
     <div class="image-container">
         <img src="{{ url_for('uploaded_file', filename=filename) }}" alt="Uploaded Image" class="result-image"/>
     </div>
-    
+
     <div class="result-box">
         <div class="prediction-section">
             <h3>Prediction</h3>
@@ -21,7 +24,7 @@
                 {% endif %}
             </div>
         </div>
-        
+
         <div class="confidence-section">
             <h3>Confidence Level</h3>
             <div class="confidence-bar">
@@ -29,7 +32,7 @@
             </div>
             <p class="confidence-text">{{ (confidence * 100)|round(1) }}% confident</p>
         </div>
-        
+
         <div class="explanation">
             {% if 'ai-generated' in prediction.lower() or 'synthetic' in prediction.lower() %}
                 <p><strong>🤖 AI-Generated Image Detected</strong></p>
@@ -40,14 +43,45 @@
             {% endif %}
         </div>
     </div>
-    
+
+    <!-- NEW: Generated Images Section (Always shown if images exist) -->
+    {% if generated_images and generated_images|length > 0 %}
+    <div class="enhancement-section">
+        <div class="enhancement-header">
+            <h3>🎨 Generated Similar Images</h3>
+            <p>AI generated {{ generated_images|length }} similar images for training data enhancement</p>
+        </div>
+
+        <div class="enhancement-details">
+            <div class="generated-images">
+                <h4>Generated Images</h4>
+                <div class="image-grid">
+                    {% for img in generated_images %}
+                    <div class="generated-image-item">
+                        <img src="{{ url_for('uploaded_file', filename=img) }}" alt="Generated Image" class="generated-image"/>
+                        <div class="image-label">
+                            <span class="label {{ 'synthetic' if 'ai-generated' in prediction.lower() else 'real' }}">
+                                {{ prediction }}
+                            </span>
+                            <button onclick="curateImage('{{ img }}', '{{ prediction }}', this)" class="btn btn-sm btn-primary">
+                                📤 Upload for Training
+                            </button>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     {% if confidence < 0.6 %}
     <div class="enhancement-section">
         <div class="enhancement-header">
             <h3>🔧 Low Confidence Enhancement</h3>
             <p>Confidence below 60% - Agent generated similar images for training data curation</p>
         </div>
-        
+
         <div class="enhancement-details">
             <div class="enhancement-info">
                 <h4>📊 Enhancement Summary</h4>
@@ -55,14 +89,14 @@
                 <p><strong>Generated Images:</strong> {{ enhancement_data.total_generated if enhancement_data else 0 }}</p>
                 <p><strong>Real Images Fetched:</strong> {{ enhancement_data.total_real if enhancement_data else 0 }}</p>
             </div>
-            
+
             {% if enhancement_data and enhancement_data.recommendation %}
             <div class="recommendation">
                 <h4>💡 Training Data Recommendation</h4>
                 <p>{{ enhancement_data.recommendation }}</p>
             </div>
             {% endif %}
-            
+
             {% if enhancement_data and enhancement_data.generated_images %}
             <div class="generated-images">
                 <h4>🎨 Generated Similar Images</h4>
@@ -81,7 +115,7 @@
                 </div>
             </div>
             {% endif %}
-            
+
             <div class="curation-actions">
                 <h4>📋 Training Data Curation</h4>
                 <p>Review the generated images above and decide which ones to add to your training dataset:</p>
@@ -100,7 +134,7 @@
         </div>
     </div>
     {% endif %}
-    
+
     <div class="action-buttons">
         <a href="{{ url_for('index') }}" class="btn btn-primary">
             🔄 Classify Another Image
@@ -109,7 +143,7 @@
             ← Go Back
         </button>
     </div>
-    
+
     <div class="tips">
         <h4>💡 Tips for Better Results</h4>
         <ul>
@@ -118,6 +152,7 @@
             <li>Recent AI-generated images may be harder to detect</li>
         </ul>
     </div>
+
 </div>
 
 <!-- Selective Curation Modal -->
@@ -127,18 +162,15 @@
             <h3>🎯 Selective Image Curation</h3>
             <span class="close" onclick="closeSelectiveModal()">&times;</span>
         </div>
-        
         <div class="modal-body">
             <div class="selection-instructions">
                 <p>Review the generated images below and select which ones you'd like to add to your training dataset:</p>
                 <div id="selectionSummary" class="selection-summary">0 image(s) selected</div>
             </div>
-            
             <div id="imageSelectionGrid" class="image-selection-grid">
                 <!-- Images will be loaded here dynamically -->
             </div>
         </div>
-        
         <div class="modal-footer">
             <button onclick="closeSelectiveModal()" class="btn btn-secondary">Cancel</button>
             <button onclick="submitSelectiveCuration()" class="btn btn-primary">Add Selected Images to Training Data</button>
@@ -147,12 +179,47 @@
 </div>
 
 <script>
+// NEW: Add curate image function
+function curateImage(filename, label, buttonElement) {
+    buttonElement.disabled = true;
+    buttonElement.textContent = '⏳ Uploading...';
+
+    fetch('/curate', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            filename: filename,
+            label: label
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            buttonElement.textContent = '✓ Uploaded';
+            buttonElement.classList.add('btn-success');
+            buttonElement.classList.remove('btn-primary');
+        } else {
+            buttonElement.textContent = '✗ Failed';
+            buttonElement.classList.add('btn-danger');
+            buttonElement.disabled = false;
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        buttonElement.textContent = '✗ Error';
+        buttonElement.classList.add('btn-danger');
+        buttonElement.disabled = false;
+    });
+}
+
 function curateTrainingData(action) {
     const data = {
         action: action,
         image_id: "{{ filename }}"
     };
-    
+
     fetch('/training-curation', {
         method: 'POST',
         headers: {
@@ -164,7 +231,6 @@ function curateTrainingData(action) {
     .then(data => {
         if (data.status === 'success') {
             alert(data.message);
-            // Optionally refresh the page or update UI
         } else {
             alert('Error: ' + data.message);
         }
@@ -176,13 +242,10 @@ function curateTrainingData(action) {
 }
 
 function showSelectiveCuration() {
-    // Open the selective curation modal
     const modal = document.getElementById('selectiveCurationModal');
     if (modal) {
         modal.style.display = 'block';
         loadImagesForSelection();
-        
-        // Add click handler to close modal when clicking outside
         modal.onclick = function(event) {
             if (event.target === modal) {
                 closeSelectiveModal();
@@ -201,39 +264,35 @@ function closeSelectiveModal() {
 function loadImagesForSelection() {
     const imageGrid = document.getElementById('imageSelectionGrid');
     if (!imageGrid) return;
-    
-    // Clear existing content
+
     imageGrid.innerHTML = '';
-    
-    // Check if we have enhancement data with generated images
+
     const enhancementSection = document.querySelector('.enhancement-section');
     if (!enhancementSection) {
         imageGrid.innerHTML = '<p>No generated images available for selection.</p>';
         return;
     }
-    
-    // Look for generated images in the enhancement section
+
     const generatedImagesContainer = enhancementSection.querySelector('.generated-images');
     if (!generatedImagesContainer) {
         imageGrid.innerHTML = '<p>No generated images found in enhancement data.</p>';
         return;
     }
-    
+
     const imageItems = generatedImagesContainer.querySelectorAll('.generated-image-item');
     if (imageItems.length === 0) {
         imageGrid.innerHTML = '<p>No images available for selection.</p>';
         return;
     }
-    
-    // Create selectable items for each generated image
+
     imageItems.forEach((imgContainer, index) => {
         const img = imgContainer.querySelector('.generated-image');
         const labelElement = imgContainer.querySelector('.label');
         const confidenceElement = imgContainer.querySelector('.confidence');
-        
+
         const label = labelElement ? labelElement.textContent : 'Unknown';
         const confidence = confidenceElement ? confidenceElement.textContent : '0%';
-        
+
         if (img && img.src) {
             const imageItem = document.createElement('div');
             imageItem.className = 'selectable-image-item';
@@ -253,28 +312,24 @@ function loadImagesForSelection() {
             imageGrid.appendChild(imageItem);
         }
     });
-    
-    // Update selection summary
+
     updateSelectionSummary();
 }
 
 function toggleImageSelection(index) {
     const checkbox = document.getElementById(`select_${index}`);
     const imageItem = checkbox.closest('.selectable-image-item');
-    
     if (checkbox.checked) {
         imageItem.classList.add('selected');
     } else {
         imageItem.classList.remove('selected');
     }
-    
     updateSelectionSummary();
 }
 
 function updateSelectionSummary() {
     const selectedCheckboxes = document.querySelectorAll('.image-checkbox:checked');
     const summary = document.getElementById('selectionSummary');
-    
     if (summary) {
         summary.textContent = `${selectedCheckboxes.length} image(s) selected`;
     }
@@ -291,19 +346,18 @@ function submitSelectiveCuration() {
             filename: img.src.split('/').pop()
         };
     });
-    
+
     if (selectedImages.length === 0) {
         alert('Please select at least one image to add to training data.');
         return;
     }
-    
-    // Send selective curation request
+
     const data = {
         action: 'selective',
         selected_images: selectedImages,
         image_id: "{{ filename }}"
     };
-    
+
     fetch('/training-curation', {
         method: 'POST',
         headers: {
@@ -316,7 +370,6 @@ function submitSelectiveCuration() {
         if (data.status === 'success') {
             alert(data.message);
             closeSelectiveModal();
-            // Optionally refresh the page or update UI
         } else {
             alert('Error: ' + data.message);
         }
@@ -327,4 +380,5 @@ function submitSelectiveCuration() {
     });
 }
 </script>
+
 {% endblock %}
